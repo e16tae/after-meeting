@@ -12,6 +12,9 @@ class Settings(BaseSettings):
 
     model_config = {"env_prefix": "AFTER_MEETING_", "env_file": ".env"}
 
+    # Device
+    device: str = "auto"  # "auto", "cuda", "cuda:0", "cuda:1", "cpu"
+
     # STT
     stt_provider: str = "qwen3"
     stt_model: str = "Qwen/Qwen3-ASR-1.7B"
@@ -36,3 +39,20 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Return a cached Settings instance."""
     return Settings()
+
+
+def resolve_device(settings: Settings | None = None) -> str:
+    """Resolve the device string from settings.
+
+    "auto" → "cuda" if available, else "cpu".
+    """
+    if settings is None:
+        settings = get_settings()
+    device = settings.device
+    if device == "auto":
+        try:
+            import torch
+            return "cuda" if torch.cuda.is_available() else "cpu"
+        except ImportError:
+            return "cpu"
+    return device

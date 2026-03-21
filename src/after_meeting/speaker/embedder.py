@@ -224,8 +224,10 @@ class SpeakerEmbedder:
             )
 
         model_path = _ensure_model()
-        providers = ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+        providers = ["CUDAExecutionProvider", "CoreMLExecutionProvider", "CPUExecutionProvider"]
         self._session = ort.InferenceSession(str(model_path), providers=providers)
+        active = self._session.get_providers()
+        logger.info("ONNX Runtime providers: %s", active)
 
     def embed(
         self,
