@@ -1,6 +1,7 @@
 """Qwen3 ASR STT provider via qwen-asr package.
 
-Speech-to-text using Qwen3-ASR-1.7B + ForcedAligner on Apple Silicon (MPS).
+Speech-to-text using Qwen3-ASR-1.7B + ForcedAligner.
+Runs on CUDA (bfloat16) when available, falls back to CPU (float32).
 Produces word-level timestamps, grouped into utterance-level segments.
 No built-in speaker diarization — use speaker/diarizer for that.
 """
@@ -10,7 +11,7 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
-from after_meeting.config import Settings
+from after_meeting.config import Settings, resolve_device
 from after_meeting.errors import STTError
 from after_meeting.models import Transcript, Utterance
 from after_meeting.stt import register
@@ -55,10 +56,13 @@ class Qwen3Provider:
                 recoverable=False,
             )
 
-        # MPS has kernel size limits that fail on large vocab matmuls,
-        # so we use CPU. For GPU acceleration, use vLLM backend instead.
-        device = "cpu"
-        dtype = torch.float32
+        device = resolve_device(self._settings)
+        if device.startswith("cuda"):
+            dtype = torch.bfloat16
+        else:
+            dtype = torch.float32
+
+        logger.info("Loading Qwen3 ASR on device=%s dtype=%s", device, dtype)
 
         try:
             self._model = Qwen3ASRModel.from_pretrained(

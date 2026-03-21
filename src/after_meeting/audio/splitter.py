@@ -69,7 +69,7 @@ def split_audio(
 
     if not check_ffmpeg():
         raise AudioError(
-            "ffmpeg not found on PATH. Install it with: brew install ffmpeg",
+            "ffmpeg not found on PATH. Install it with: apt install ffmpeg",
             code="AUDIO_FFMPEG_MISSING",
             recoverable=False,
         )
