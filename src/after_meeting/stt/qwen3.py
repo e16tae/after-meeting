@@ -88,16 +88,20 @@ class Qwen3Provider:
         )
 
         try:
+            attn_impl = "sdpa" if device.startswith("cuda") else "eager"
+
             self._model = Qwen3ASRModel.from_pretrained(
                 self._model_repo,
                 dtype=dtype,
                 device_map=device,
+                attn_implementation=attn_impl,
                 max_new_tokens=4096,
                 max_inference_batch_size=batch_size,
                 forced_aligner=self._aligner_repo,
                 forced_aligner_kwargs=dict(
                     dtype=dtype,
                     device_map=device,
+                    attn_implementation=attn_impl,
                 ),
             )
         except Exception as exc:
@@ -122,10 +126,12 @@ class Qwen3Provider:
             )
 
         model = self._load_model()
+        context = getattr(self._settings, "stt_context", "") or ""
 
         try:
             results = model.transcribe(
                 audio=str(audio_path),
+                context=context,
                 language=language,
                 return_time_stamps=True,
             )

@@ -22,6 +22,7 @@ def run_pipeline(
     with_appendix: bool = False,
     stt_provider: str | None = None,
     llm_provider: str | None = None,
+    context: str | None = None,
     chunk_minutes: int | None = None,
 ) -> dict:
     """Run the full transcribe → diarize → structure → render pipeline.
@@ -33,6 +34,8 @@ def run_pipeline(
     from after_meeting.rendering import get_renderer
 
     settings = get_settings()
+    if context is not None:
+        settings = settings.model_copy(update={"stt_context": context})
     out = Path(output_dir) if output_dir else Path(".")
     out.mkdir(parents=True, exist_ok=True)
 
@@ -47,7 +50,9 @@ def run_pipeline(
     if len(transcript.speakers) <= 1:
         try:
             from after_meeting.speaker.diarizer import diarize_transcript
-            transcript = diarize_transcript(transcript, audio_path)
+            transcript = diarize_transcript(
+                transcript, audio_path, settings=settings,
+            )
             transcript_path.write_text(transcript.model_dump_json(indent=2), encoding="utf-8")
         except ImportError:
             logger.warning("Speaker diarization not available (speaker extras not installed)")
