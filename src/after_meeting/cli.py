@@ -36,12 +36,14 @@ def cli() -> None:
 @click.option("--output", "-o", type=click.Path(path_type=Path), default=None)
 @click.option("--language", "-l", default=None, help="Language code (e.g. 'ko'). Auto-detected if omitted.")
 @click.option("--stt-provider", default=None, help="STT provider name.")
+@click.option("--context", "-c", default=None, help="Contextual hints for ASR (topic, names, jargon).")
 @click.option("--json", "as_json", is_flag=True, help="Output JSON for agent consumption.")
 def transcribe(
     audio_path: Path,
     output: Path | None,
     language: str | None,
     stt_provider: str | None,
+    context: str | None,
     as_json: bool,
 ) -> None:
     """Transcribe audio file to a transcript JSON."""
@@ -50,6 +52,8 @@ def transcribe(
     from after_meeting.errors import STTError
 
     settings = get_settings()
+    if context is not None:
+        settings = settings.model_copy(update={"stt_context": context})
     provider_name = stt_provider or settings.stt_provider
 
     try:
@@ -225,6 +229,7 @@ def render(
 @click.option("--with-appendix", is_flag=True, help="Include full transcript appendix.")
 @click.option("--stt-provider", default=None)
 @click.option("--llm-provider", default=None)
+@click.option("--context", "-c", default=None, help="Contextual hints for ASR (topic, names, jargon).")
 @click.option("--chunk-minutes", type=int, default=None, help="Audio chunk size in minutes (default: 55).")
 @click.option("--json", "as_json", is_flag=True, help="Output JSON for agent consumption.")
 def process(
@@ -238,6 +243,7 @@ def process(
     with_appendix: bool,
     stt_provider: str | None,
     llm_provider: str | None,
+    context: str | None,
     chunk_minutes: int | None,
     as_json: bool,
 ) -> None:
@@ -256,6 +262,7 @@ def process(
             with_appendix=with_appendix,
             stt_provider=stt_provider,
             llm_provider=llm_provider,
+            context=context,
             chunk_minutes=chunk_minutes,
         )
     except AfterMeetingError as e:

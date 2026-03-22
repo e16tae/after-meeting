@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     stt_provider: str = "qwen3"
     stt_model: str = "Qwen/Qwen3-ASR-1.7B"
     stt_aligner: str = "Qwen/Qwen3-ForcedAligner-0.6B"
+    stt_context: str = ""  # contextual hints for ASR (e.g. topic, names, jargon)
 
     # LLM
     llm_provider: str = "codex"

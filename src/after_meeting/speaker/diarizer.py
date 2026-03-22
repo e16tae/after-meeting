@@ -1,136 +1,150 @@
-"""Per-utterance speaker diarization using CAM++ embeddings.
+"""Speaker diarization using pyannote.audio pipeline.
 
-Assigns speaker labels to utterances that have no diarization
-(e.g., from Qwen3 ASR which outputs all utterances as "Speaker 0").
+Assigns speaker labels to Qwen3-ASR utterances by running pyannote
+diarization on the audio and matching speaker segments to word timestamps.
 """
 from __future__ import annotations
 
 import logging
 from pathlib import Path
 
-import numpy as np
-
+from after_meeting.config import Settings, resolve_device
+from after_meeting.errors import SpeakerError
 from after_meeting.models import Transcript, Utterance
-from after_meeting.speaker.embedder import SpeakerEmbedder
 
 logger = logging.getLogger(__name__)
 
+_HF_MODEL = "pyannote/speaker-diarization-3.1"
 
-def _cluster_embeddings(
-    embeddings: list[np.ndarray],
-    num_speakers: int | None = None,
-    similarity_threshold: float = 0.75,
-) -> list[int]:
-    """Cluster embeddings into speaker groups via agglomerative clustering.
 
-    If num_speakers is None, auto-detect by merging until similarity < threshold.
-    Returns list of cluster labels (0-indexed).
-    """
-    n = len(embeddings)
-    if n == 0:
-        return []
-    if n == 1:
-        return [0]
+def _load_pipeline(device: str):
+    """Load pyannote diarization pipeline onto the given device."""
+    try:
+        import torch
+        from pyannote.audio import Pipeline
+    except ImportError:
+        raise SpeakerError(
+            "pyannote.audio is not installed. "
+            "Install it with: uv pip install pyannote.audio",
+            code="SPEAKER_DEPENDENCY_MISSING",
+            recoverable=False,
+        )
 
-    sim = np.zeros((n, n), dtype=np.float64)
-    for i in range(n):
-        for j in range(i, n):
-            s = float(np.dot(embeddings[i], embeddings[j]))
-            sim[i, j] = s
-            sim[j, i] = s
+    try:
+        pipeline = Pipeline.from_pretrained(_HF_MODEL)
+    except Exception as exc:
+        raise SpeakerError(
+            f"Failed to load pyannote pipeline '{_HF_MODEL}': {exc}. "
+            "You may need to accept the model terms at "
+            f"https://huggingface.co/{_HF_MODEL} and set HF_TOKEN.",
+            code="SPEAKER_MODEL_LOAD",
+            recoverable=False,
+        ) from exc
 
-    if num_speakers is not None and num_speakers == 1:
-        return [0] * n
+    if device.startswith("cuda"):
+        import torch
+        pipeline.to(torch.device(device))
 
-    labels = list(range(n))
+    return pipeline
 
-    def cluster_sim(c1: list[int], c2: list[int]) -> float:
-        total = sum(sim[i, j] for i in c1 for j in c2)
-        count = len(c1) * len(c2)
-        return total / count if count > 0 else 0.0
 
-    while True:
-        unique_labels = sorted(set(labels))
-        n_clusters = len(unique_labels)
+def _assign_speakers(
+    utterances: list[Utterance],
+    diarization,
+) -> list[Utterance]:
+    """Assign pyannote speaker labels to utterances by time overlap."""
+    segments = []
+    for turn, _, speaker in diarization.itertracks(yield_label=True):
+        segments.append((turn.start, turn.end, speaker))
 
-        if num_speakers is not None and n_clusters <= num_speakers:
-            break
-        if n_clusters <= 1:
-            break
+    new_utterances = []
+    for utt in utterances:
+        mid = (utt.start_time + utt.end_time) / 2
+        best_speaker = "Speaker 0"
+        best_overlap = 0.0
 
-        best_sim = -1.0
-        best_pair = (0, 0)
-        clusters = {l: [i for i, lab in enumerate(labels) if lab == l] for l in unique_labels}
+        for seg_start, seg_end, speaker in segments:
+            overlap_start = max(utt.start_time, seg_start)
+            overlap_end = min(utt.end_time, seg_end)
+            overlap = max(0.0, overlap_end - overlap_start)
 
-        for idx_a, la in enumerate(unique_labels):
-            for lb in unique_labels[idx_a + 1:]:
-                s = cluster_sim(clusters[la], clusters[lb])
-                if s > best_sim:
-                    best_sim = s
-                    best_pair = (la, lb)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_speaker = speaker
 
-        if num_speakers is None and best_sim < similarity_threshold:
-            break
+        if best_overlap == 0.0:
+            for seg_start, seg_end, speaker in segments:
+                if seg_start <= mid <= seg_end:
+                    best_speaker = speaker
+                    break
 
-        merge_from, merge_to = best_pair[1], best_pair[0]
-        labels = [merge_to if l == merge_from else l for l in labels]
+        new_utterances.append(Utterance(
+            speaker=best_speaker,
+            start_time=utt.start_time,
+            end_time=utt.end_time,
+            text=utt.text,
+        ))
 
-    unique = sorted(set(labels))
-    remap = {old: new for new, old in enumerate(unique)}
-    return [remap[l] for l in labels]
+    return new_utterances
+
+
+def _normalize_speaker_labels(utterances: list[Utterance]) -> list[Utterance]:
+    """Rename pyannote labels (SPEAKER_00, SPEAKER_01, ...) to Speaker 1, 2, ..."""
+    label_map: dict[str, str] = {}
+    counter = 1
+    result = []
+
+    for utt in utterances:
+        if utt.speaker not in label_map:
+            label_map[utt.speaker] = f"Speaker {counter}"
+            counter += 1
+        result.append(Utterance(
+            speaker=label_map[utt.speaker],
+            start_time=utt.start_time,
+            end_time=utt.end_time,
+            text=utt.text,
+        ))
+
+    return result
 
 
 def diarize_transcript(
     transcript: Transcript,
     audio_path: Path,
     num_speakers: int | None = None,
+    settings: Settings | None = None,
 ) -> Transcript:
-    """Assign speaker labels to utterances using CAM++ voice embeddings."""
+    """Assign speaker labels to utterances using pyannote diarization."""
     if not transcript.utterances:
         return transcript
 
-    embedder = SpeakerEmbedder()
-    embeddings: list[np.ndarray | None] = []
+    if settings is None:
+        from after_meeting.config import get_settings
+        settings = get_settings()
 
-    for utt in transcript.utterances:
-        try:
-            emb = embedder.embed(audio_path, start=utt.start_time, end=utt.end_time)
-            embeddings.append(emb)
-        except Exception:
-            logger.warning("Failed to embed utterance %.1f-%.1f", utt.start_time, utt.end_time)
-            embeddings.append(None)
+    device = resolve_device(settings)
+    logger.info("Running pyannote diarization on device=%s", device)
 
-    valid_indices = [i for i, e in enumerate(embeddings) if e is not None]
-    valid_embeddings = [embeddings[i] for i in valid_indices]
+    pipeline = _load_pipeline(device)
 
-    if not valid_embeddings:
-        logger.warning("No embeddings extracted, returning transcript unchanged")
-        return transcript
+    diarize_kwargs = {}
+    if num_speakers is not None:
+        diarize_kwargs["num_speakers"] = num_speakers
 
-    cluster_labels = _cluster_embeddings(valid_embeddings, num_speakers=num_speakers)
+    try:
+        diarization = pipeline(str(audio_path), **diarize_kwargs)
+    except Exception as exc:
+        raise SpeakerError(
+            f"Pyannote diarization failed: {exc}",
+            code="SPEAKER_DIARIZE",
+            recoverable=True,
+        ) from exc
 
-    full_labels = [0] * len(embeddings)
-    for idx, valid_idx in enumerate(valid_indices):
-        full_labels[valid_idx] = cluster_labels[idx]
-
-    for i, emb in enumerate(embeddings):
-        if emb is None and valid_indices:
-            nearest = min(valid_indices, key=lambda vi: abs(
-                transcript.utterances[vi].start_time - transcript.utterances[i].start_time
-            ))
-            full_labels[i] = full_labels[nearest]
-
-    new_utterances = [
-        Utterance(
-            speaker=f"Speaker {label + 1}",
-            start_time=utt.start_time,
-            end_time=utt.end_time,
-            text=utt.text,
-        )
-        for utt, label in zip(transcript.utterances, full_labels)
-    ]
-
+    new_utterances = _assign_speakers(transcript.utterances, diarization)
+    new_utterances = _normalize_speaker_labels(new_utterances)
     new_speakers = sorted({u.speaker for u in new_utterances})
+
+    logger.info("Diarization complete: %d speakers detected", len(new_speakers))
 
     return Transcript(
         language=transcript.language,
