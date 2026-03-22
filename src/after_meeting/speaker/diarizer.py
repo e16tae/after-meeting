@@ -6,6 +6,8 @@ diarization on the audio and matching speaker segments to word timestamps.
 from __future__ import annotations
 
 import logging
+import subprocess
+import tempfile
 from pathlib import Path
 
 from after_meeting.config import Settings, resolve_device
@@ -127,18 +129,42 @@ def diarize_transcript(
 
     pipeline = _load_pipeline(device)
 
+    # pyannote requires WAV; convert if needed
+    audio_path = Path(audio_path)
+    tmp_dir = None
+    if audio_path.suffix.lower() not in (".wav", ".wave"):
+        tmp_dir = tempfile.mkdtemp()
+        wav_path = Path(tmp_dir) / f"{audio_path.stem}.wav"
+        logger.info("Converting %s to WAV for pyannote", audio_path.suffix)
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", str(audio_path), "-ar", "16000", "-ac", "1",
+             "-loglevel", "error", str(wav_path)],
+            check=True, timeout=120,
+        )
+        audio_path = wav_path
+
     diarize_kwargs = {}
     if num_speakers is not None:
         diarize_kwargs["num_speakers"] = num_speakers
 
     try:
-        diarization = pipeline(str(audio_path), **diarize_kwargs)
+        result = pipeline(str(audio_path), **diarize_kwargs)
     except Exception as exc:
         raise SpeakerError(
             f"Pyannote diarization failed: {exc}",
             code="SPEAKER_DIARIZE",
             recoverable=True,
         ) from exc
+    finally:
+        if tmp_dir is not None:
+            import shutil
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    # pyannote 4.x returns DiarizeOutput; use exclusive (no overlap) for ASR alignment
+    if hasattr(result, "exclusive_speaker_diarization"):
+        diarization = result.exclusive_speaker_diarization
+    else:
+        diarization = result
 
     new_utterances = _assign_speakers(transcript.utterances, diarization)
     new_utterances = _normalize_speaker_labels(new_utterances)
