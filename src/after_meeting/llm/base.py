@@ -9,6 +9,6 @@ from typing import Protocol, runtime_checkable
 class LLMProvider(Protocol):
     """Protocol for LLM providers used to structure meeting transcripts."""
 
-    def complete(self, prompt: str) -> str:
+    def complete(self, prompt: str, *, json_schema: dict | None = None) -> str:
         """Send a prompt and return the completion text."""
         ...

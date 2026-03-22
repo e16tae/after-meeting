@@ -37,9 +37,37 @@ class CodexProvider:
         self._auth = self._load_auth()
         self._model = self._load_model()
 
-    def complete(self, prompt: str, *, _retry: bool = True) -> str:
+    def complete(
+        self,
+        prompt: str,
+        *,
+        json_schema: dict | None = None,
+        _retry: bool = True,
+    ) -> str:
         access_token = self._auth["tokens"]["access_token"]
         account_id = self._auth["tokens"]["account_id"]
+
+        body: dict = {
+            "model": self._model,
+            "instructions": "You are a helpful assistant that outputs valid JSON.",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": prompt}],
+                }
+            ],
+            "store": False,
+            "stream": True,
+        }
+
+        if json_schema is not None:
+            body["text"] = {
+                "format": {
+                    "type": "json_schema",
+                    "json_schema": json_schema,
+                }
+            }
 
         try:
             with httpx.stream(
@@ -50,19 +78,7 @@ class CodexProvider:
                     "Content-Type": "application/json",
                     "X-Account-Id": account_id,
                 },
-                json={
-                    "model": self._model,
-                    "instructions": "You are a helpful assistant that outputs valid JSON.",
-                    "input": [
-                        {
-                            "type": "message",
-                            "role": "user",
-                            "content": [{"type": "input_text", "text": prompt}],
-                        }
-                    ],
-                    "store": False,
-                    "stream": True,
-                },
+                json=body,
                 timeout=300,
             ) as resp:
                 if resp.status_code == 401:
