@@ -49,7 +49,8 @@ class TestSimplifiedPipeline:
         mock_llm.complete.return_value = _make_structured_json()
 
         with patch("after_meeting.stt.get_provider", return_value=mock_stt), \
-             patch("after_meeting.structuring.analyzer.get_provider", return_value=mock_llm):
+             patch("after_meeting.structuring.analyzer.get_provider", return_value=mock_llm), \
+             patch("after_meeting.audio.splitter.get_duration", return_value=600.0):
 
             from after_meeting.pipeline import run_pipeline
             result = run_pipeline(
@@ -78,6 +79,7 @@ class TestSimplifiedPipeline:
 
         with patch("after_meeting.stt.get_provider", return_value=mock_stt), \
              patch("after_meeting.structuring.analyzer.get_provider", return_value=mock_llm), \
+             patch("after_meeting.audio.splitter.get_duration", return_value=600.0), \
              patch("after_meeting.pipeline.logger") as mock_logger, \
              patch("after_meeting.speaker.diarizer.diarize_transcript", return_value=diarized_transcript) as mock_diarize:
 
@@ -105,6 +107,7 @@ class TestSimplifiedPipeline:
 
         with patch("after_meeting.stt.get_provider", return_value=mock_stt), \
              patch("after_meeting.structuring.analyzer.get_provider", return_value=mock_llm), \
+             patch("after_meeting.audio.splitter.get_duration", return_value=600.0), \
              patch("after_meeting.speaker.diarizer.diarize_transcript") as mock_diarize:
 
             from after_meeting.pipeline import run_pipeline
@@ -131,6 +134,7 @@ class TestSimplifiedPipeline:
 
         with patch("after_meeting.stt.get_provider", return_value=mock_stt), \
              patch("after_meeting.structuring.analyzer.get_provider", return_value=mock_llm), \
+             patch("after_meeting.audio.splitter.get_duration", return_value=600.0), \
              patch("after_meeting.speaker.diarizer.diarize_transcript", side_effect=RuntimeError("test error")):
 
             from after_meeting.pipeline import run_pipeline

@@ -3,11 +3,63 @@
 from __future__ import annotations
 
 import logging
+import tempfile
 from pathlib import Path
 
 from after_meeting.config import get_settings
+from after_meeting.models import Transcript, Utterance
 
 logger = logging.getLogger(__name__)
+
+_CHUNK_THRESHOLD_MINUTES = 30  # split audio longer than this
+
+
+def _merge_chunk_transcripts(
+    chunks_info: list,
+    transcripts: list[Transcript],
+) -> Transcript:
+    """Merge per-chunk transcripts into one, adjusting timestamps and deduplicating overlap."""
+    all_utterances: list[Utterance] = []
+
+    for chunk, transcript in zip(chunks_info, transcripts):
+        offset = chunk.start_time
+
+        for utt in transcript.utterances:
+            adjusted = Utterance(
+                speaker=utt.speaker,
+                start_time=utt.start_time + offset,
+                end_time=utt.end_time + offset,
+                text=utt.text,
+            )
+
+            # Skip duplicates in overlap region
+            if all_utterances:
+                last = all_utterances[-1]
+                if (
+                    adjusted.start_time <= last.end_time
+                    and adjusted.text == last.text
+                ):
+                    continue
+
+            all_utterances.append(adjusted)
+
+    # Sort by time to ensure correct order
+    all_utterances.sort(key=lambda u: u.start_time)
+
+    lang = transcripts[0].language if transcripts else "auto"
+    speakers = sorted({u.speaker for u in all_utterances})
+    duration = all_utterances[-1].end_time if all_utterances else 0.0
+
+    return Transcript(
+        language=lang,
+        speakers=speakers,
+        utterances=all_utterances,
+        metadata={
+            "audio_file": str(chunks_info[0].audio_path) if chunks_info else "",
+            "duration": duration,
+            "chunks": len(transcripts),
+        },
+    )
 
 
 def run_pipeline(
@@ -27,8 +79,10 @@ def run_pipeline(
 ) -> dict:
     """Run the full transcribe → diarize → structure → render pipeline.
 
-    Returns a JSON-serializable result dict.
+    Long audio is automatically split into chunks for STT to avoid GPU OOM.
+    Speaker diarization (pyannote) runs on the full audio for global consistency.
     """
+    from after_meeting.audio.splitter import get_duration, split_audio
     from after_meeting.stt import get_provider as get_stt
     from after_meeting.structuring.analyzer import analyze
     from after_meeting.rendering import get_renderer
@@ -39,14 +93,22 @@ def run_pipeline(
     out = Path(output_dir) if output_dir else Path(".")
     out.mkdir(parents=True, exist_ok=True)
 
-    # Step 1: Transcribe
+    chunk_min = chunk_minutes or settings.chunk_minutes
     stt = get_stt(stt_provider or settings.stt_provider, settings=settings)
-    transcript = stt.transcribe(audio_path, language=language)
+
+    # Step 1: Transcribe (with auto-split for long audio)
+    duration = get_duration(audio_path)
+    if duration > _CHUNK_THRESHOLD_MINUTES * 60:
+        transcript = _transcribe_chunked(
+            audio_path, stt, language, chunk_min, settings.overlap_seconds,
+        )
+    else:
+        transcript = stt.transcribe(audio_path, language=language)
 
     transcript_path = out / f"{audio_path.stem}_transcript.json"
     transcript_path.write_text(transcript.model_dump_json(indent=2), encoding="utf-8")
 
-    # Step 2: Diarize if speakers not already assigned
+    # Step 2: Diarize on full audio (pyannote, ~1.6GB VRAM)
     if len(transcript.speakers) <= 1:
         try:
             from after_meeting.speaker.diarizer import diarize_transcript
@@ -95,5 +157,41 @@ def run_pipeline(
             "title": structured.title,
             "speakers_detected": len(transcript.speakers),
             "language": transcript.language,
+            "audio_duration_seconds": duration,
         },
     }
+
+
+def _transcribe_chunked(
+    audio_path: Path,
+    stt,
+    language: str | None,
+    chunk_minutes: int,
+    overlap_seconds: int,
+) -> Transcript:
+    """Split long audio into chunks, transcribe each, and merge."""
+    from after_meeting.audio.splitter import split_audio
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp = Path(tmp_dir)
+        chunks = split_audio(
+            audio_path,
+            output_dir=tmp,
+            chunk_minutes=chunk_minutes,
+            overlap_seconds=overlap_seconds,
+        )
+        logger.info(
+            "Audio split into %d chunks (%d min each, %ds overlap)",
+            len(chunks), chunk_minutes, overlap_seconds,
+        )
+
+        transcripts: list[Transcript] = []
+        for i, chunk in enumerate(chunks):
+            logger.info(
+                "Transcribing chunk %d/%d [%.0f-%.0fs]",
+                i + 1, len(chunks), chunk.start_time, chunk.end_time,
+            )
+            t = stt.transcribe(Path(chunk.audio_path), language=language)
+            transcripts.append(t)
+
+    return _merge_chunk_transcripts(chunks, transcripts)

@@ -11,7 +11,7 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
-from after_meeting.config import Settings, resolve_device
+from after_meeting.config import Settings, resolve_batch_size, resolve_device
 from after_meeting.errors import STTError
 from after_meeting.models import Transcript, Utterance
 from after_meeting.stt import register
@@ -40,25 +40,6 @@ class Qwen3Provider:
         self._aligner_repo = getattr(settings, "stt_aligner", None) or _DEFAULT_ALIGNER
         self._model = None
 
-    @staticmethod
-    def _resolve_batch_size(device: str) -> int:
-        """Choose max_inference_batch_size based on GPU VRAM."""
-        if not device.startswith("cuda"):
-            return 4
-        try:
-            import torch
-            dev_idx = int(device.split(":")[-1]) if ":" in device else 0
-            total_gb = torch.cuda.get_device_properties(dev_idx).total_mem / (1024 ** 3)
-            if total_gb >= 24:
-                return 16
-            if total_gb >= 16:
-                return 8
-            if total_gb >= 12:
-                return 4
-            return 2
-        except Exception:
-            return 4
-
     def _load_model(self):
         """Lazy-load the model on first use."""
         if self._model is not None:
@@ -78,10 +59,12 @@ class Qwen3Provider:
         device = resolve_device(self._settings)
         if device.startswith("cuda"):
             dtype = torch.bfloat16
+            import os
+            os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
         else:
             dtype = torch.float32
 
-        batch_size = self._resolve_batch_size(device)
+        batch_size = resolve_batch_size(device)
         logger.info(
             "Loading Qwen3 ASR on device=%s dtype=%s batch_size=%d",
             device, dtype, batch_size,
