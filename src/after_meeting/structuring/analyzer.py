@@ -33,6 +33,64 @@ _CHUNKED_PROMPT_BUILDERS = {
 
 _CONTEXT_WINDOW_UTTERANCES = 15
 
+# JSON Schema for Responses API structured output (strict mode)
+_STRUCTURED_MEETING_SCHEMA = {
+    "name": "structured_meeting",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "date": {"type": "string"},
+            "doc_type": {"type": "string"},
+            "agenda_discussions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "topic": {"type": "string"},
+                        "summary": {"type": "string"},
+                        "speaker_contributions": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "speaker": {"type": "string"},
+                                    "contribution": {"type": "string"},
+                                },
+                                "required": ["speaker", "contribution"],
+                                "additionalProperties": False,
+                            },
+                        },
+                    },
+                    "required": ["topic", "summary", "speaker_contributions"],
+                    "additionalProperties": False,
+                },
+            },
+            "decisions": {"type": "array", "items": {"type": "string"}},
+            "action_items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "assignee": {"type": ["string", "null"]},
+                        "description": {"type": "string"},
+                        "deadline": {"type": ["string", "null"]},
+                    },
+                    "required": ["assignee", "description", "deadline"],
+                    "additionalProperties": False,
+                },
+            },
+            "executive_summary": {"type": ["string", "null"]},
+        },
+        "required": [
+            "title", "date", "doc_type", "agenda_discussions",
+            "decisions", "action_items", "executive_summary",
+        ],
+        "additionalProperties": False,
+    },
+}
+
 
 def _chunk_transcript(transcript: Transcript, max_utterances: int) -> list[Transcript]:
     """Split transcript into chunks of roughly max_utterances each."""
@@ -87,8 +145,10 @@ def _analyze_chunked(
             total_chunks=len(chunks),
             context_prefix=context,
         )
-        raw_response = provider.complete(prompt)
-        json_text = _extract_json(raw_response)
+        raw_response = provider.complete(
+            prompt, json_schema=_STRUCTURED_MEETING_SCHEMA,
+        )
+        json_text = _try_extract_json(raw_response)
         try:
             partial = StructuredMeeting.model_validate_json(json_text)
         except Exception as exc:
@@ -102,18 +162,21 @@ def _analyze_chunked(
     return merge_structured_meetings(partial_results)
 
 
-def _extract_json(text: str) -> str:
-    """Extract JSON from LLM response, stripping markdown code fences if present."""
-    # Try to find JSON inside ```json ... ``` or ``` ... ``` blocks
-    pattern = r"```(?:json)?\s*\n?(.*?)\n?\s*```"
-    match = re.search(pattern, text, re.DOTALL)
-    if match:
-        return match.group(1).strip()
+def _try_extract_json(text: str) -> str:
+    """Extract JSON from LLM response.
 
-    # If no code block, try to find raw JSON (starts with '{')
+    With structured output enabled, the response is already pure JSON.
+    Falls back to stripping markdown code fences for non-schema responses.
+    """
     stripped = text.strip()
     if stripped.startswith("{"):
         return stripped
+
+    # Fallback: strip markdown code fences
+    pattern = r"```(?:json)?\s*\n?(.*?)\n?\s*```"
+    match = re.search(pattern, stripped, re.DOTALL)
+    if match:
+        return match.group(1).strip()
 
     raise LLMError(
         "LLM response does not contain valid JSON.",
@@ -178,11 +241,12 @@ def analyze(
             max_utterances=max_utterances,
         )
     else:
-        # Existing single-pass path (unchanged)
         build_prompt = _PROMPT_BUILDERS[doc_type]
         prompt = build_prompt(transcript, title, date)
-        raw_response = provider.complete(prompt)
-        json_text = _extract_json(raw_response)
+        raw_response = provider.complete(
+            prompt, json_schema=_STRUCTURED_MEETING_SCHEMA,
+        )
+        json_text = _try_extract_json(raw_response)
         try:
             structured = StructuredMeeting.model_validate_json(json_text)
         except Exception as exc:
