@@ -65,7 +65,9 @@ class CodexProvider:
             body["text"] = {
                 "format": {
                     "type": "json_schema",
-                    "json_schema": json_schema,
+                    "name": json_schema.get("name", "response"),
+                    "strict": json_schema.get("strict", True),
+                    "schema": json_schema["schema"],
                 }
             }
 
